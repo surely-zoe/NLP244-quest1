@@ -2,7 +2,7 @@
 Language Modeling and Transfer Learning
 <br />
 <br />
-#### 🚩 What is the % of <unk> tokens in the full training data?
+#### 🚩 What is the % of unk tokens in the full training data?
 ![flag 1](https://i.imgur.com/fu1xqX3.png)
 <br />
 <br />
