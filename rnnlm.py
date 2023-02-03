@@ -12,6 +12,8 @@ class RNNModel(nn.Module):
         n_layers,
         dropout=0.5,
         rnn_type="elman",  # can be elman, lstm, gru
+        bidirectional=False,
+        glove=False
     ):
         super(RNNModel, self).__init__()
 
@@ -22,6 +24,23 @@ class RNNModel(nn.Module):
                 n_layers,
                 nonlinearity="tanh",
                 dropout=dropout,
+                bidirectional=bidirectional
+            )
+        elif rnn_type == "lstm":
+            self.rnn = nn.LSTM(
+                in_embedding_dim,
+                n_hidden,
+                n_layers,
+                dropout=dropout,
+                bidirectional=bidirectional
+            )
+        elif rnn_type == "gru":
+            self.rnn = nn.GRU(
+                in_embedding_dim,
+                n_hidden,
+                n_layers,
+                dropout=dropout,
+                bidirectional=bidirectional
             )
         else:
             # TODO: implement lstm and gru
@@ -30,11 +49,15 @@ class RNNModel(nn.Module):
         
         self.in_embedder = nn.Embedding(vocab_size, in_embedding_dim)
         self.dropout = nn.Dropout(dropout)
-        self.pooling = nn.Linear(n_hidden, vocab_size)
-        self.init_weights()
+        self.pooling = nn.Linear(n_hidden * 2, vocab_size) if bidirectional else nn.Linear(n_hidden, vocab_size)
+        if not glove:
+            self.init_weights()
+        self.in_embedding_dim = in_embedding_dim
         self.n_hidden = n_hidden
         self.n_layers = n_layers
         self.vocab_size = vocab_size
+        self.rnn_type = rnn_type
+        self.bidirectional = bidirectional
 
     def init_weights(self):
         initrange = 0.1
@@ -52,6 +75,14 @@ class RNNModel(nn.Module):
 
     def init_hidden(self, batch_size):
         weight = next(self.parameters())
+        if self.rnn_type == "lstm":
+            if self.bidirectional:
+                return (weight.new_zeros(self.n_layers*2, batch_size, self.n_hidden), weight.new_zeros(self.n_layers*2, batch_size, self.n_hidden))
+            return (weight.new_zeros(self.n_layers, batch_size, self.n_hidden), weight.new_zeros(self.n_layers, batch_size, self.n_hidden))
+        
+        # for rnn and gru
+        if self.bidirectional:
+            return weight.new_zeros(self.n_layers*2, batch_size, self.n_hidden)
         return weight.new_zeros(self.n_layers, batch_size, self.n_hidden)
 
     @staticmethod

@@ -3,6 +3,7 @@ import time
 import math
 import torch
 import torch.nn as nn
+import numpy as np
 import torch.onnx
 
 import data
@@ -10,14 +11,25 @@ from utils import get_device, repackage_hidden, make_reproducible
 from rnnlm import RNNModel
 
 
-def init_glove_embeddings(model: RNNModel, glove_path):
-    # TODO: implement this function
-    raise NotImplementedError
-
+def init_glove_embeddings(model: RNNModel, glove_path, word_to_idx, unfreeze):
+    with open(glove_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    
+    embeddings = np.zeros((model.vocab_size, model.in_embedding_dim))
+    for line in lines:
+        parts = line.strip().split(' ')
+        word = parts[0]
+        vec = np.array([float(x) for x in parts[1:]])
+        if word in word_to_idx:
+            idx = word_to_idx[word]
+            embeddings[idx] = vec
+    
+    with torch.no_grad():
+        model.in_embedder.weight.data.copy_(torch.from_numpy(embeddings))
+        model.in_embedder.weight.requiresGrad = unfreeze
 
 def compute_perplexity(loss: float):
-    # TODO: implement this function
-    raise NotImplementedError
+    return math.exp(loss)
 
 
 def parse_args():
@@ -56,6 +68,13 @@ def parse_args():
     parser.add_argument(
         "--save", type=str, default="model.pt", help="path to save the final model"
     )
+
+    # new arguments added
+    parser.add_argument("--adam", type=bool, default=False, help="use Adam optimizer over manual optimizer")
+    parser.add_argument("--rnntype", type=str, default="elman", help="RNN model type")
+    parser.add_argument("--bidirectional", type=bool, default=False, help="Should the RNN be bidirectional?")
+    parser.add_argument("--glove", type=bool, default=False, help="use glove embeddings instead of one-hot vectors")
+    parser.add_argument("--unfreeze", type=bool, default=False, help="Unfreeze glove embedding layer?")
     return parser.parse_args()
 
 
@@ -121,24 +140,38 @@ def train_model_step(corpus, args, model, criterion, epoch, lr):
     start_time = time.time()
     ntokens = len(corpus.vocab)
     hidden = model.init_hidden(args.batch_size)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr) if args.adam else None
+
     for batch, i in enumerate(range(0, train_data.size(0) - 1, args.seq_len)):
         data, targets = get_batch(train_data, i)
         # Starting each batch, we detach the hidden state from how it was previously produced.
         # If we didn't, the model would try backpropagating all the way to start of the dataset.
         model.zero_grad()
+        if args.adam:
+            optimizer.zero_grad()
         hidden = repackage_hidden(hidden)
         output, hidden = model(data, hidden)
         loss = criterion(output, targets)
         loss.backward()
+        if args.adam:
+            optimizer.step()
 
-        # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
+        # # Gradient accumulation
+        # if (batch + 1) % args.accumulation_steps == 0:
+            # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
         torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip)
-        for p in model.parameters():
-            p.data.add_(p.grad, alpha=-lr)
+        
+        if not args.adam:
+            params_to_update = [p for p in model.parameters() if p.requires_grad == True]
+            torch.nn.utils.clip_grad_norm_(params_to_update, args.clip)
+            for p in params_to_update:
+                p.data.add_(p.grad, alpha=-lr)
 
         total_loss += loss.item()
 
         if batch % args.log_interval == 0 and batch > 0:
+            print(total_loss)
+            print(args.log_interval)
             cur_loss = total_loss / args.log_interval
             elapsed = time.time() - start_time
             print(
@@ -217,9 +250,15 @@ if __name__ == "__main__":
     test_data = batchify(corpus.test, eval_batch_size)
 
     ntokens = len(corpus.vocab)
-    model = RNNModel(ntokens, args.emsize, args.nhid, args.nlayers, args.dropout).to(
-        device
-    )
+    
+    # Flag: What is the % of <unk> tokens in the full training data?
+    unk_count = (torch.bincount(corpus.train)[corpus.vocab.type2index['<unk>']]).item()
+    total_count = len(corpus.train)
+    print('Percentage of <unk> tokens in the full training data: ', (unk_count*100/total_count), '%')
+
+    model = RNNModel(ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.rnntype, args.bidirectional, args.glove).to(device)
+    if args.glove:
+        init_glove_embeddings(model, "./data/glove.6B.50d.txt", corpus.vocab.type2index, args.unfreeze)
     criterion = nn.NLLLoss()
     train_model(corpus, args, model, criterion)
     test_model(corpus, args, model, criterion)
